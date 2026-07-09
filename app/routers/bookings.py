@@ -1,4 +1,5 @@
 """Booking creation, listing, detail and cancellation."""
+from decimal import ROUND_HALF_UP, Decimal
 import threading
 import time
 from datetime import datetime, timedelta
@@ -24,6 +25,7 @@ MAX_DURATION_HOURS = 8
 QUOTA_LIMIT = 3
 QUOTA_WINDOW_HOURS = 24
 
+booking_write_lock = threading.Lock()
 # Serializes the check-then-write critical sections (conflict/quota on create,
 # status check on cancel) so the invariants hold under concurrent requests.
 _booking_write_lock = threading.Lock()
@@ -102,6 +104,7 @@ def create_booking(
     if room is None:
         raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
 
+    with booking_write_lock:
     price_cents = room.hourly_rate_cents * duration_hours
 
     with _booking_write_lock:
@@ -113,6 +116,7 @@ def create_booking(
 
         _check_quota(db, user.id, now, start)
 
+        price_cents = room.hourly_rate_cents * duration_hours
         booking = Booking(
             room_id=room.id,
             user_id=user.id,
@@ -127,6 +131,10 @@ def create_booking(
         db.commit()
         db.refresh(booking)
 
+        stats.record_create(room.id, price_cents)
+        cache.invalidate_availability(room.id, start.date().isoformat())
+        cache.invalidate_report(user.org_id)
+        notifications.notify_created(booking)
     stats.record_create(room.id, price_cents)
     cache.invalidate_availability(room.id, start.date().isoformat())
     cache.invalidate_report(user.org_id)
@@ -175,6 +183,9 @@ def get_booking(
     if user.role != "admin" and booking.user_id != user.id:
         raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
 
+    if user.role != "admin" and booking.user_id != user.id:
+        raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
+
     response = serialize_booking(booking)
     response["refunds"] = [
         {
@@ -193,17 +204,36 @@ def cancel_booking(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    booking = (
-        db.query(Booking)
-        .join(Room, Booking.room_id == Room.id)
-        .filter(Booking.id == booking_id, Room.org_id == user.org_id)
-        .first()
-    )
-    if booking is None:
-        raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
-    if user.role != "admin" and booking.user_id != user.id:
-        raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
+    with booking_write_lock:
+        booking = (
+            db.query(Booking)
+            .join(Room, Booking.room_id == Room.id)
+            .filter(Booking.id == booking_id, Room.org_id == user.org_id)
+            .first()
+        )
+        if booking is None:
+            raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
+        if user.role != "admin" and booking.user_id != user.id:
+            raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
 
+        if booking.status == "cancelled":
+            raise AppError(409, "ALREADY_CANCELLED", "Booking already cancelled")
+
+        now = datetime.utcnow()
+        notice = booking.start_time - now
+        if notice >= timedelta(hours=48):
+            refund_percent = 100
+        elif notice >= timedelta(hours=24):
+            refund_percent = 50
+        else:
+            refund_percent = 0
+
+        refund_amount_cents = int(
+            (Decimal(booking.price_cents) * refund_percent / Decimal(100))
+            .quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+
+        log_refund(db, booking, refund_amount_cents)
     with _booking_write_lock:
         # Re-read committed state so a concurrent cancel of the same booking is
         # observed and only the first one produces a refund.
@@ -228,6 +258,10 @@ def cancel_booking(
         booking.status = "cancelled"
         db.commit()
 
+        stats.record_cancel(booking.room_id, booking.price_cents)
+        cache.invalidate_report(user.org_id)
+        cache.invalidate_availability(booking.room_id, booking.start_time.date().isoformat())
+        notifications.notify_cancelled(booking)
     stats.record_cancel(booking.room_id, booking.price_cents)
     cache.invalidate_report(user.org_id)
     cache.invalidate_availability(booking.room_id, booking.start_time.date().isoformat())

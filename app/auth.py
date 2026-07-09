@@ -86,6 +86,12 @@ def revoke_access_token(payload: dict) -> None:
     _revoked_tokens.add(payload["jti"])
 
 
+def is_jti_revoked(jti: str) -> bool:
+    return jti in _revoked_tokens
+
+
+def revoke_jti(jti: str) -> None:
+    _revoked_tokens.add(jti)
 def is_token_revoked(payload: dict) -> bool:
     return payload.get("jti") in _revoked_tokens
 
@@ -98,6 +104,7 @@ def get_token_payload(request: Request) -> dict:
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
+    if payload.get("jti") in _revoked_tokens:
     if is_token_revoked(payload):
         raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
     return payload

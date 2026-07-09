@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..models import Booking, RefundLog
 
 
+def log_refund(db: Session, booking: Booking, amount_cents: int) -> RefundLog:
 def log_refund(db: Session, booking: Booking, percent: int) -> RefundLog:
     # Refund = percent% of price_cents, rounded to the nearest cent with
     # half-cents rounding up. Integer math avoids float rounding drift.
