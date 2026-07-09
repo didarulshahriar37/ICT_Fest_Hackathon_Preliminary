@@ -4,7 +4,7 @@ This document details all 21 bugs identified, analyzed, and successfully resolve
 
 ---
 
-## 🔑 Authentication & Token Management
+## Authentication & Token Management
 
 ### Bug 1: Access Token Lifetime Expiry
 * **File & Lines**: [app/auth.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/auth.py#L50)
@@ -86,7 +86,7 @@ This document details all 21 bugs identified, analyzed, and successfully resolve
 
 ---
 
-## 📅 Booking Logic & Constraints
+## Booking Logic & Constraints
 
 ### Bug 5: Future Booking Past Start Time Grace Window
 * **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L93)
@@ -211,7 +211,7 @@ This document details all 21 bugs identified, analyzed, and successfully resolve
 
 ---
 
-## 💰 Cancellation & CSV Export
+## Cancellation & CSV Export
 
 ### Bug 12: Cancellation Refund Tier Boundaries
 * **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L210-L218)
@@ -283,7 +283,7 @@ This document details all 21 bugs identified, analyzed, and successfully resolve
 
 ---
 
-## ⚡ Concurrency & Race Conditions
+## Concurrency & Race Conditions
 
 ### Bug 16: Lock-Ordering Deadlock in Notifications
 * **File & Lines**: [app/services/notifications.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/services/notifications.py#L24-L36)
