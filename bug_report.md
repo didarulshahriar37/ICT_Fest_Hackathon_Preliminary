@@ -108,14 +108,14 @@ This document details all 21 bugs identified, analyzed, and successfully resolve
 * **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L182)
 * **Description**: The GET `/bookings/{id}` detail route overwrote the booking's `start_time` with the creation time `iso_utc(booking.created_at)`.
 * **Code Change**:
-  ```diff
-# BEFORE
-response = serialize_booking(booking)
-- response["start_time"] = iso_utc(booking.created_at)
-
-# AFTER
-response = serialize_booking(booking)
-```
+  ```python
+  # BEFORE
+  response = serialize_booking(booking)
+  response["start_time"] = iso_utc(booking.created_at)
+  
+  # AFTER
+  response = serialize_booking(booking)
+  ```
 
 ---
 
