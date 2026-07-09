@@ -12,6 +12,7 @@ from ..auth import (
     verify_password,
     is_jti_revoked,
     revoke_jti,
+    check_and_revoke_jti,
 )
 from ..database import get_db
 from ..errors import AppError
@@ -43,7 +44,6 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     )
     if existing is not None:
         raise AppError(409, "USERNAME_TAKEN", "Username already taken within organization")
-        raise AppError(409, "USERNAME_TAKEN", "Username already taken")
 
     user = User(
         org_id=org.id,
@@ -91,12 +91,12 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     if data.get("type") != "refresh":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
     jti = data.get("jti")
-    if jti is None or is_jti_revoked(jti):
+    if jti is None:
         raise AppError(401, "UNAUTHORIZED", "Refresh token has been used")
     user = db.query(User).filter(User.id == int(data["sub"])).first()
     if user is None:
         raise AppError(401, "UNAUTHORIZED", "Unknown user")
-    revoke_jti(jti)
+    check_and_revoke_jti(jti)
     return {
         "access_token": create_access_token(user),
         "refresh_token": create_refresh_token(user),

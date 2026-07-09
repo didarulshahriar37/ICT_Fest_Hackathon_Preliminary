@@ -5,6 +5,7 @@ sequential golden path and is not a substitute for full API testing.
 """
 from datetime import datetime, timedelta, timezone
 
+# pyrefly: ignore [missing-import]
 from fastapi.testclient import TestClient
 
 from app.main import app

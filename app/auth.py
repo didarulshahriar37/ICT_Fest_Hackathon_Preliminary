@@ -1,12 +1,16 @@
 """Authentication: password hashing, JWT issue/verify, request dependencies."""
 import hashlib
+import threading
 import hmac
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
+# pyrefly: ignore [missing-import]
 import jwt
+# pyrefly: ignore [missing-import]
 from fastapi import Depends, Request
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 
 from .config import (
@@ -84,6 +88,16 @@ def decode_token(token: str) -> dict:
 
 def revoke_access_token(payload: dict) -> None:
     _revoked_tokens.add(payload["jti"])
+
+
+_refresh_lock = threading.Lock()
+
+
+def check_and_revoke_jti(jti: str) -> None:
+    with _refresh_lock:
+        if jti in _revoked_tokens:
+            raise AppError(401, "UNAUTHORIZED", "Refresh token has been used")
+        _revoked_tokens.add(jti)
 
 
 def is_jti_revoked(jti: str) -> bool:

@@ -1,5 +1,7 @@
 """Database engine and session management."""
+# pyrefly: ignore [missing-import]
 from sqlalchemy import create_engine
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import DATABASE_URL

@@ -1,7 +1,9 @@
 """Room management, availability and live statistics."""
 from datetime import datetime, time, timedelta
 
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, Query
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 
 from .. import cache
@@ -108,7 +110,7 @@ def room_stats(
     user: User = Depends(get_current_user),
 ):
     room = _get_org_room(db, room_id, user.org_id)
-    current = stats.get(room.id)
+    current = stats.get(room.id, db)
     return {
         "room_id": room.id,
         "total_confirmed_bookings": current["count"],

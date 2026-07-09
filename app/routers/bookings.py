@@ -4,7 +4,9 @@ import threading
 import time
 from datetime import datetime, timedelta
 
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, Query
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 
 from .. import cache
@@ -115,7 +117,7 @@ def create_booking(
             start_time=start,
             end_time=end,
             status="confirmed",
-            reference_code=reference.next_reference_code(),
+            reference_code=reference.next_reference_code(db),
             price_cents=price_cents,
             created_at=now,
         )
@@ -123,7 +125,7 @@ def create_booking(
         db.commit()
         db.refresh(booking)
 
-        stats.record_create(room.id, price_cents)
+        stats.record_create(room.id, price_cents, db)
         cache.invalidate_availability(room.id, start.date().isoformat())
         cache.invalidate_report(user.org_id)
         notifications.notify_created(booking)
@@ -225,7 +227,7 @@ def cancel_booking(
         booking.status = "cancelled"
         db.commit()
 
-        stats.record_cancel(booking.room_id, booking.price_cents)
+        stats.record_cancel(booking.room_id, booking.price_cents, db)
         cache.invalidate_report(user.org_id)
         cache.invalidate_availability(booking.room_id, booking.start_time.date().isoformat())
         notifications.notify_cancelled(booking)
