@@ -10,6 +10,8 @@ from ..auth import (
     hash_password,
     revoke_access_token,
     verify_password,
+    is_jti_revoked,
+    revoke_jti,
 )
 from ..database import get_db
 from ..errors import AppError
@@ -26,8 +28,13 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     if org is None:
         org = Organization(name=payload.org_name)
         db.add(org)
-        db.commit()
-        db.refresh(org)
+        try:
+            db.commit()
+            db.refresh(org)
+        except Exception:
+            db.rollback()
+            org = db.query(Organization).filter(Organization.name == payload.org_name).first()
+            role = "member"
 
     existing = (
         db.query(User)
@@ -35,12 +42,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         .first()
     )
     if existing is not None:
-        return {
-            "user_id": existing.id,
-            "org_id": org.id,
-            "username": existing.username,
-            "role": existing.role,
-        }
+        raise AppError(409, "USERNAME_TAKEN", "Username already taken within organization")
 
     user = User(
         org_id=org.id,
@@ -49,8 +51,12 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         role=role,
     )
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    try:
+        db.commit()
+        db.refresh(user)
+    except Exception:
+        db.rollback()
+        raise AppError(409, "USERNAME_TAKEN", "Username already taken within organization")
     return {
         "user_id": user.id,
         "org_id": org.id,
@@ -83,9 +89,13 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     data = decode_token(payload.refresh_token)
     if data.get("type") != "refresh":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
+    jti = data.get("jti")
+    if jti is None or is_jti_revoked(jti):
+        raise AppError(401, "UNAUTHORIZED", "Refresh token has been used")
     user = db.query(User).filter(User.id == int(data["sub"])).first()
     if user is None:
         raise AppError(401, "UNAUTHORIZED", "Unknown user")
+    revoke_jti(jti)
     return {
         "access_token": create_access_token(user),
         "refresh_token": create_refresh_token(user),
