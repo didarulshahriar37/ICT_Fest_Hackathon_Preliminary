@@ -25,9 +25,6 @@ MAX_DURATION_HOURS = 8
 QUOTA_LIMIT = 3
 QUOTA_WINDOW_HOURS = 24
 
-booking_write_lock = threading.Lock()
-# Serializes the check-then-write critical sections (conflict/quota on create,
-# status check on cancel) so the invariants hold under concurrent requests.
 _booking_write_lock = threading.Lock()
 
 
@@ -104,12 +101,7 @@ def create_booking(
     if room is None:
         raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
 
-    with booking_write_lock:
-    price_cents = room.hourly_rate_cents * duration_hours
-
     with _booking_write_lock:
-        # Start a fresh read so conflict/quota checks see the latest committed
-        # state (any prior read snapshot from this request is discarded).
         db.rollback()
         if _has_conflict(db, room.id, start, end):
             raise AppError(409, "ROOM_CONFLICT", "Room already booked for this interval")
@@ -135,10 +127,6 @@ def create_booking(
         cache.invalidate_availability(room.id, start.date().isoformat())
         cache.invalidate_report(user.org_id)
         notifications.notify_created(booking)
-    stats.record_create(room.id, price_cents)
-    cache.invalidate_availability(room.id, start.date().isoformat())
-    cache.invalidate_report(user.org_id)
-    notifications.notify_created(booking)
 
     return serialize_booking(booking)
 
@@ -183,9 +171,6 @@ def get_booking(
     if user.role != "admin" and booking.user_id != user.id:
         raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
 
-    if user.role != "admin" and booking.user_id != user.id:
-        raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
-
     response = serialize_booking(booking)
     response["refunds"] = [
         {
@@ -204,7 +189,8 @@ def cancel_booking(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    with booking_write_lock:
+    with _booking_write_lock:
+        db.rollback()
         booking = (
             db.query(Booking)
             .join(Room, Booking.room_id == Room.id)
@@ -234,25 +220,6 @@ def cancel_booking(
         )
 
         log_refund(db, booking, refund_amount_cents)
-    with _booking_write_lock:
-        # Re-read committed state so a concurrent cancel of the same booking is
-        # observed and only the first one produces a refund.
-        db.rollback()
-        db.refresh(booking)
-        if booking.status == "cancelled":
-            raise AppError(409, "ALREADY_CANCELLED", "Booking already cancelled")
-
-        now = datetime.utcnow()
-        notice = booking.start_time - now
-        if notice >= timedelta(hours=48):
-            refund_percent = 100
-        elif notice >= timedelta(hours=24):
-            refund_percent = 50
-        else:
-            refund_percent = 0
-
-        entry = log_refund(db, booking, refund_percent)
-        refund_amount_cents = entry.amount_cents
 
         _settlement_pause()
         booking.status = "cancelled"
@@ -262,10 +229,6 @@ def cancel_booking(
         cache.invalidate_report(user.org_id)
         cache.invalidate_availability(booking.room_id, booking.start_time.date().isoformat())
         notifications.notify_cancelled(booking)
-    stats.record_cancel(booking.room_id, booking.price_cents)
-    cache.invalidate_report(user.org_id)
-    cache.invalidate_availability(booking.room_id, booking.start_time.date().isoformat())
-    notifications.notify_cancelled(booking)
 
     return {
         "id": booking.id,

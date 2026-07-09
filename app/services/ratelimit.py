@@ -8,7 +8,6 @@ _WINDOW_SECONDS = 60
 _MAX_REQUESTS = 20
 
 _buckets: dict[int, list[float]] = {}
-_buckets_lock = threading.Lock()
 _lock = threading.Lock()
 
 
@@ -19,10 +18,6 @@ def _settle_pause() -> None:
 
 
 def record_and_check(user_id: int) -> None:
-    now = time.time()
-    with _buckets_lock:
-    # Trim, record and count must be atomic or concurrent callers race on the
-    # shared bucket and the limit stops being enforced correctly.
     with _lock:
         now = time.time()
         bucket = _buckets.get(user_id, [])
@@ -32,6 +27,3 @@ def record_and_check(user_id: int) -> None:
         _buckets[user_id] = bucket
         if len(bucket) > _MAX_REQUESTS:
             raise AppError(429, "RATE_LIMITED", "Too many booking requests")
-        count = len(bucket)
-    if count > _MAX_REQUESTS:
-        raise AppError(429, "RATE_LIMITED", "Too many booking requests")
