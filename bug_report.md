@@ -1,150 +1,405 @@
-# Bug Report - CoWork REST API
+# Finalized Bug Report - CoWork REST API
 
-This document details all 21 bugs identified and resolved in the CoWork REST API.
+This document details all 21 bugs identified, analyzed, and successfully resolved in the CoWork REST API. For each bug, the report covers the exact location, failure analysis, and side-by-side comparison of the code before and after the fix.
 
 ---
+
+## 🔑 Authentication & Token Management
 
 ### Bug 1: Access Token Lifetime Expiry
 * **File & Lines**: [app/auth.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/auth.py#L50)
-* **Description**: The lifetime of the access token was computed as `timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES * 60)`, which evaluates to 900 minutes (15 hours) instead of 15 minutes (900 seconds).
-* **Fix**: Removed the `* 60` multiplier to make it `timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)`.
+* **Description**: The access token's lifetime was incorrectly computed by multiplying by `60` inside the `timedelta` constructor, converting 15 minutes to 900 minutes (15 hours) instead of 900 seconds.
+* **Code Change**:
+  ```python
+  # BEFORE
+  lifetime = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+  
+  # AFTER
+  lifetime = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+  ```
 
 ---
 
-### Bug 2: Logout Access Token Revocation Comparisons
-* **File & Lines**: [app/auth.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/auth.py#L97)
-* **Description**: Revoking an access token during logout added the token's `jti` to `_revoked_tokens`. However, the validation check in `get_token_payload` checked if the user ID (`sub`) was in `_revoked_tokens`, allowing revoked tokens to remain active.
-* **Fix**: Changed the check to assert if `payload.get("jti")` is in `_revoked_tokens`.
+### Bug 2: Logout Access Token Revocation Comparison
+* **File & Lines**: [app/auth.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/auth.py#L97-L109)
+* **Description**: Logging out added the access token's `jti` to `_revoked_tokens`. However, the validation check inside `get_token_payload` checked if the user ID (`sub`) was in `_revoked_tokens`, rendering the token revocation check completely ineffective.
+* **Code Change**:
+  ```python
+  # BEFORE
+  if payload.get("sub") in _revoked_tokens:
+      raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
+  
+  # AFTER
+  if is_token_revoked(payload): # checks if payload.get("jti") is in _revoked_tokens
+      raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
+  ```
 
 ---
 
 ### Bug 3: Duplicate Registration Returns Existing User
 * **File & Lines**: [app/routers/auth.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/auth.py#L32-L43)
-* **Description**: Registering a duplicate username in the same organization returned the existing user details with status `201 Created` instead of raising a `409 USERNAME_TAKEN` error.
-* **Fix**: Raised `AppError(409, "USERNAME_TAKEN", "...")`. Added transaction rollback and handling of database constraints for concurrent duplicate registrations.
+* **Description**: Registering an existing username inside the same organization returned the existing user details with status `201 Created` instead of raising a conflict error.
+* **Code Change**:
+  ```python
+  # BEFORE
+  existing = db.query(User).filter(User.org_id == org.id, User.username == payload.username).first()
+  if existing is not None:
+      return serialize_user(existing)
+  
+  # AFTER
+  existing = db.query(User).filter(User.org_id == org.id, User.username == payload.username).first()
+  if existing is not None:
+      raise AppError(409, "USERNAME_TAKEN", "Username already taken within organization")
+  ```
 
 ---
 
-### Bug 4: Future Booking Past Start Time Grace Window
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L90)
+### Bug 4: Infinite Reusability of Refresh Tokens
+* **File & Lines**: [app/routers/auth.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/auth.py#L89-L105) & [app/auth.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/auth.py#L92-L100)
+* **Description**: Refresh tokens could be used indefinitely to create new access tokens because their `jti` values were never stored or validated for single-use rotation.
+* **Code Change**:
+  ```python
+  # BEFORE
+  @router.post("/refresh")
+  def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
+      data = decode_token(payload.refresh_token)
+      if data.get("type") != "refresh":
+          raise AppError(401, "UNAUTHORIZED", "Wrong token type")
+      user = db.query(User).filter(User.id == int(data["sub"])).first()
+      return { ... }
+  
+  # AFTER
+  @router.post("/refresh")
+  def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
+      data = decode_token(payload.refresh_token)
+      if data.get("type") != "refresh":
+          raise AppError(401, "UNAUTHORIZED", "Wrong token type")
+      jti = data.get("jti")
+      if jti is None:
+          raise AppError(401, "UNAUTHORIZED", "Refresh token has been used")
+      user = db.query(User).filter(User.id == int(data["sub"])).first()
+      if user is None:
+          raise AppError(401, "UNAUTHORIZED", "Unknown user")
+      check_and_revoke_jti(jti) # Thread-safe check-then-revoke
+      return { ... }
+  ```
+
+---
+
+## 📅 Booking Logic & Constraints
+
+### Bug 5: Future Booking Past Start Time Grace Window
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L93)
 * **Description**: The future check allowed bookings up to 5 minutes in the past due to `start <= now - timedelta(seconds=300)`.
-* **Fix**: Removed the grace window by changing the check to `start <= now`.
+* **Code Change**:
+  ```python
+  # BEFORE
+  if start <= now - timedelta(seconds=300):
+      raise AppError(400, "INVALID_BOOKING_WINDOW", "start_time must be in the future")
+  
+  # AFTER
+  if start <= now:
+      raise AppError(400, "INVALID_BOOKING_WINDOW", "start_time must be in the future")
+  ```
 
 ---
 
-### Bug 5: Booking Details Endpoint Overwriting Start Time
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L172)
+### Bug 6: Booking Details Endpoint Overwriting Start Time
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L182)
 * **Description**: The GET `/bookings/{id}` detail route overwrote the booking's `start_time` with the creation time `iso_utc(booking.created_at)`.
-* **Fix**: Deleted this line.
+* **Code Change**:
+  ```diff
+  # BEFORE
+  response = serialize_booking(booking)
+- response["start_time"] = iso_utc(booking.created_at)
+  
+  # AFTER
+  response = serialize_booking(booking)
+  ```
 
 ---
 
-### Bug 6: Timezone Offset Stripped instead of Converted
-* **File & Lines**: [app/timeutils.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/timeutils.py#L11-L14)
-* **Description**: The utility `parse_input_datetime` stripped timezone offsets using `dt.replace(tzinfo=None)` instead of converting them to UTC first, storing local wall-clock times as-is.
-* **Fix**: Adjusted to UTC before stripping the timezone offset: `dt.astimezone(timezone.utc).replace(tzinfo=None)`.
-
----
-
-### Bug 7: Infinite Reusability of Refresh Tokens
-* **File & Lines**: [app/routers/auth.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/auth.py#L81-L93)
-* **Description**: Refresh tokens were infinitely reusable as they were not checked for single-use rotation or invalidated upon ingestion.
-* **Fix**: Tracked used refresh token `jti` identifiers in a revoked set, checking for reuse and invalidating them upon successful rotation.
+### Bug 7: Timezone Offset Stripped instead of Converted
+* **File & Lines**: [app/timeutils.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/timeutils.py#L10-L15)
+* **Description**: The helper `parse_input_datetime` stripped timezone offsets using `.replace(tzinfo=None)` without converting them to UTC first, storing local wall-clock times as naive UTC.
+* **Code Change**:
+  ```python
+  # BEFORE
+  dt = datetime.fromisoformat(value)
+  if dt.tzinfo is not None:
+      dt = dt.replace(tzinfo=None)
+  
+  # AFTER
+  dt = datetime.fromisoformat(value)
+  if dt.tzinfo is not None:
+      dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+  ```
 
 ---
 
 ### Bug 8: Missing Booking Minimum Duration Bounds
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L97)
-* **Description**: Only the maximum duration bound (8 hours) was validated, allowing bookings with zero-hour or negative durations.
-* **Fix**: Added validation to ensure duration is between `MIN_DURATION_HOURS` (1) and `MAX_DURATION_HOURS` (8).
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L100)
+* **Description**: The booking creation logic only validated the maximum duration (8 hours), allowing bookings with zero-hour or negative durations.
+* **Code Change**:
+  ```python
+  # BEFORE
+  if duration_hours > MAX_DURATION_HOURS:
+      raise AppError(400, "INVALID_BOOKING_WINDOW", "duration out of range")
+  
+  # AFTER
+  if duration_hours < MIN_DURATION_HOURS or duration_hours > MAX_DURATION_HOURS:
+      raise AppError(400, "INVALID_BOOKING_WINDOW", "duration out of range")
+  ```
 
 ---
 
 ### Bug 9: Overlapping Booking Operator Logic
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L54)
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L57)
 * **Description**: Overlap checking in `_has_conflict` used inclusive `<=` comparison, preventing back-to-back room bookings.
-* **Fix**: Changed comparison operators to strict `<`.
+* **Code Change**:
+  ```python
+  # BEFORE
+  if b.start_time <= end and start <= b.end_time:
+      return True
+  
+  # AFTER
+  if b.start_time < end and start < b.end_time:
+      return True
+  ```
 
 ---
 
 ### Bug 10: Bookings Pagination and Ordering Broken
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L142-L147)
-* **Description**: The listing was sorted descending instead of ascending, offset skipped page 1 due to `page * limit`, and the page limit was hardcoded to `10` ignoring user inputs.
-* **Fix**: Ordered by ascending `start_time` (ties by ascending `id`), calculated offsets as `(page - 1) * limit`, and respected the dynamic limit parameter.
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L145-L151)
+* **Description**: Bookings were sorted descending instead of ascending, offset skipped page 1 due to `page * limit`, and the page limit was hardcoded to `10` ignoring user inputs.
+* **Code Change**:
+  ```python
+  # BEFORE
+  items = (
+      base.order_by(Booking.start_time.desc(), Booking.id.asc())
+      .offset(page * limit)
+      .limit(10)
+      .all()
+  )
+  
+  # AFTER
+  items = (
+      base.order_by(Booking.start_time.asc(), Booking.id.asc())
+      .offset((page - 1) * limit)
+      .limit(limit)
+      .all()
+  )
+  ```
 
 ---
 
 ### Bug 11: Cross-User Booking Leak
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L157-L170)
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L173-L177)
 * **Description**: Non-admin users could read other members' bookings by knowing their booking IDs, as detail checks were only scoped by organization.
-* **Fix**: Restricted view permissions to the owner or admins of the organization, raising `404 BOOKING_NOT_FOUND` otherwise.
+* **Code Change**:
+  ```python
+  # BEFORE
+  if booking is None:
+      raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
+  
+  # AFTER
+  if booking is None:
+      raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
+  if user.role != "admin" and booking.user_id != user.id:
+      raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
+  ```
 
 ---
 
+## 💰 Cancellation & CSV Export
+
 ### Bug 12: Cancellation Refund Tier Boundaries
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L207-L212)
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L210-L218)
 * **Description**: A booking cancelled at exactly 48 hours notice fell into the 50% refund tier, and notice under 24 hours defaulted to 50% instead of 0%.
-* **Fix**: Fixed notice comparison boundaries to match the 100%, 50%, and 0% tiers exactly.
+* **Code Change**:
+  ```python
+  # BEFORE
+  if notice > timedelta(hours=48):
+      refund_percent = 100
+  else:
+      refund_percent = 50
+  
+  # AFTER
+  if notice >= timedelta(hours=48):
+      refund_percent = 100
+  elif notice >= timedelta(hours=24):
+      refund_percent = 50
+  else:
+      refund_percent = 0
+  ```
 
 ---
 
 ### Bug 13: Refund Amount Rounding and Ledger Mismatch
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L214) and [app/services/refunds.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/services/refunds.py#L14-L17)
-* **Description**: Cancel responses used round-to-even `round()` while `log_refund` used floating-point truncation, causing mismatches.
-* **Fix**: Standardized calculations to use Python's `Decimal` module with `ROUND_HALF_UP` quantization, passing the exact cent values into the log ledger.
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L220-L224)
+* **Description**: Cancel responses used round-to-even `round()` while `log_refund` used floating-point truncation, causing mismatches between the returned response and the database ledger.
+* **Code Change**:
+  ```python
+  # BEFORE
+  refund_amount_cents = int(round(booking.price_cents * refund_percent / 100))
+  log_refund(db, booking, refund_amount_cents)
+  
+  # AFTER
+  refund_amount_cents = int(
+      (Decimal(booking.price_cents) * refund_percent / Decimal(100))
+      .quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+  )
+  log_refund(db, booking, refund_amount_cents)
+  ```
 
 ---
 
 ### Bug 14: CSV Export Cross-Org Data Leak
-* **File & Lines**: [app/services/export.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/services/export.py#L48-L50) and [app/routers/admin.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/admin.py#L65-L74)
-* **Description**: Export endpoint did not verify if the requested `room_id` belonged to the caller's organization under `include_all=True`, permitting data leaks.
-* **Fix**: Checked room ownership in the router (raising `404 ROOM_NOT_FOUND` on violation) and forced all query routes in the service to remain org-scoped.
+* **File & Lines**: [app/routers/admin.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/admin.py#L72-L75) & [app/services/export.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/services/export.py#L38-L55)
+* **Description**: The export endpoint did not verify if the requested `room_id` belonged to the caller's organization under `include_all=True`, permitting data leaks across organizations.
+* **Code Change**:
+  ```python
+  # BEFORE
+  # (No check in admin.py for room ownership)
+  csv_body = generate_export(db, admin.org_id, admin.id, room_id, include_all)
+  
+  # AFTER
+  if room_id is not None:
+      room = db.query(Room).filter(Room.id == room_id, Room.org_id == admin.org_id).first()
+      if room is None:
+          raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
+  csv_body = generate_export(db, admin.org_id, admin.id, room_id, include_all)
+  ```
 
 ---
 
 ### Bug 15: Missing Cache Invalidation Gaps
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L121) and [app/routers/rooms.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/rooms.py#L56)
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L126-L127), [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L228-L229), & [app/routers/rooms.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/rooms.py#L57)
 * **Description**: Reports remained stale because booking creation did not invalidate report caches, cancellations did not invalidate availability caches, and room creations did not invalidate reports.
-* **Fix**: Added missing cache invalidation calls upon room/booking creations and cancellations.
+* **Code Change**:
+  Added missing cache invalidation calls upon room/booking creations and cancellations:
+  * `cache.invalidate_report(org_id)` on booking creation, cancellation, and room creation.
+  * `cache.invalidate_availability(room_id, date)` on booking creation and cancellation.
 
 ---
 
-### Bug 16: Lock-Ordering deadlock in Notifications
+## ⚡ Concurrency & Race Conditions
+
+### Bug 16: Lock-Ordering Deadlock in Notifications
 * **File & Lines**: [app/services/notifications.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/services/notifications.py#L24-L36)
-* **Description**: `notify_created` acquired locks `_email` -> `_audit`, whereas `notify_cancelled` acquired them in reverse order, leading to concurrent deadlocks.
-* **Fix**: Synchronized lock acquisition ordering (acquiring `_email` first) across both operations.
+* **Description**: `notify_created` acquired locks `_email` -> `_audit`, whereas `notify_cancelled` acquired them in reverse order (`_audit` -> `_email`), leading to concurrent deadlocks.
+* **Code Change**:
+  ```python
+  # BEFORE (notify_cancelled)
+  with _audit_lock:
+      _write_audit("cancelled", booking)
+      with _email_lock:
+          _send_email("cancelled", booking)
+  
+  # AFTER (notify_cancelled - synchronized order)
+  with _email_lock:
+      _send_email("cancelled", booking)
+      with _audit_lock:
+          _write_audit("cancelled", booking)
+  ```
 
 ---
 
 ### Bug 17: Concurrent Booking Double Creation and Quotas
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L104-L123)
-* **Description**: Concurrent booking requests could bypass conflict/quota constraints due to thread yields inside `time.sleep` calls.
-* **Fix**: Wrapped verification checks and booking creation in a synchronized `booking_write_lock` block.
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L107-L114)
+* **Description**: Concurrent booking requests could bypass conflict/quota constraints due to thread yields inside `time.sleep` calls, resulting in double bookings.
+* **Code Change**:
+  ```python
+  # BEFORE
+  # (no lock wrapping conflict checking and database commit)
+  
+  # AFTER
+  with _booking_write_lock:
+      db.rollback()  # Clears cached snapshot to read latest committed state
+      if _has_conflict(db, room.id, start, end):
+          raise AppError(409, "ROOM_CONFLICT", "...")
+  ```
 
 ---
 
 ### Bug 18: Concurrent Cancellations and Double Refunds
-* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L195-L224)
-* **Description**: Simultaneous cancellation requests could bypass status verification and commit multiple refund logs.
-* **Fix**: Wrapped the cancellation sequence in the `booking_write_lock`, refreshing the database object state inside the lock before checking status.
+* **File & Lines**: [app/routers/bookings.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py#L200-L208)
+* **Description**: Simultaneous cancellation requests could bypass status verification and commit multiple refund logs due to database snapshot caching.
+* **Code Change**:
+  ```python
+  # BEFORE
+  # (no lock wrapping status checking and cancel commit)
+  
+  # AFTER
+  with _booking_write_lock:
+      db.rollback()
+      booking = db.query(Booking)...first()
+      if booking.status == "cancelled":
+          raise AppError(409, "ALREADY_CANCELLED", "...")
+  ```
 
 ---
 
 ### Bug 19: Sequence Counter Race in Reference Code Generation
-* **File & Lines**: [app/services/reference.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/services/reference.py#L17-L21)
+* **File & Lines**: [app/services/reference.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/services/reference.py#L20-L24)
 * **Description**: Concurrent booking creations could read identical counter states before increments, generating duplicate reference codes.
-* **Fix**: Protected reference code increments using a thread mutex lock.
+* **Code Change**:
+  ```python
+  # BEFORE
+  current = _counter["value"]
+  _format_pause()
+  _counter["value"] = current + 1
+  return f"CW-{current:06d}"
+  
+  # AFTER
+  with _lock:
+      # lazy init from DB if needed
+      current = _counter["value"]
+      _format_pause()
+      _counter["value"] = current + 1
+      return f"CW-{current:06d}"
+  ```
 
 ---
 
 ### Bug 20: Rate Limit Verification Race Condition
 * **File & Lines**: [app/services/ratelimit.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/services/ratelimit.py#L18-L26)
-* **Description**: Concurrent request arrivals read identical stale timestamp buckets, bypassing request limits.
-* **Fix**: Protected bucket reads and updates using a thread mutex lock.
+* **Description**: Concurrent request arrivals read identical stale timestamp buckets, bypassing rolling-window request limits.
+* **Code Change**:
+  ```python
+  # BEFORE
+  bucket = _buckets.get(user_id, [])
+  # ...
+  _buckets[user_id] = bucket
+  
+  # AFTER
+  with _lock:
+      bucket = _buckets.get(user_id, [])
+      # ...
+      _buckets[user_id] = bucket
+  ```
 
 ---
 
-### Bug 21: Lost Incremental Statistics Updates
-* **File & Lines**: [app/services/stats.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/services/stats.py#L15-L27)
-* **Description**: Concurrent stats modifications read stale counters during sleep phases, causing incorrect reporting of bookings and revenue.
-* **Fix**: Wrapped statistics updates with a thread mutex lock.
+### Bug 21: Lost Incremental Statistics Updates & Lazy Initialization
+* **File & Lines**: [app/services/stats.py](file:///d:/Hackathon/ICT_Fest_Hackathon_Preliminary/app/services/stats.py#L30-L48)
+* **Description**: Concurrent stats modifications read stale counters during sleep phases, causing incorrect reporting of bookings and revenue. Additionally, lazy initialization from DB upon restart could double-count the currently committed booking.
+* **Code Change**:
+  ```python
+  # BEFORE (Fardin commit double-counting bug)
+  with _lock:
+      if room_id not in _stats:
+          _load_stats_from_db(room_id, db)
+      current = _stats.get(room_id, {"count": 0, "revenue": 0})
+      # increments applied directly, causing double counts
+      _stats[room_id] = {"count": count + 1, "revenue": revenue + price_cents}
+  
+  # AFTER (Final correct code)
+  with _lock:
+      if room_id not in _stats:
+          _load_stats_from_db(room_id, db) # Loads committed state (includes new booking)
+      else:
+          # Only apply incremental updates in memory if already initialized
+          current = _stats[room_id]
+          _stats[room_id] = {"count": current["count"] + 1, "revenue": current["revenue"] + price_cents}
+  ```
