@@ -8,6 +8,7 @@ import time
 
 _stats: dict[int, dict] = {}
 _stats_lock = threading.Lock()
+_lock = threading.Lock()
 
 
 def _aggregate_pause() -> None:
@@ -16,6 +17,8 @@ def _aggregate_pause() -> None:
 
 def record_create(room_id: int, price_cents: int) -> None:
     with _stats_lock:
+    # Read-modify-write must be atomic or concurrent updates are lost.
+    with _lock:
         current = _stats.get(room_id, {"count": 0, "revenue": 0})
         count, revenue = current["count"], current["revenue"]
         _aggregate_pause()
@@ -24,6 +27,7 @@ def record_create(room_id: int, price_cents: int) -> None:
 
 def record_cancel(room_id: int, price_cents: int) -> None:
     with _stats_lock:
+    with _lock:
         current = _stats.get(room_id, {"count": 0, "revenue": 0})
         count, revenue = current["count"], current["revenue"]
         _aggregate_pause()
@@ -31,4 +35,5 @@ def record_cancel(room_id: int, price_cents: int) -> None:
 
 
 def get(room_id: int) -> dict:
-    return _stats.get(room_id, {"count": 0, "revenue": 0})
+    with _lock:
+        return dict(_stats.get(room_id, {"count": 0, "revenue": 0}))

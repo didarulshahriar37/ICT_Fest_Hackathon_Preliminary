@@ -8,6 +8,7 @@ from ..auth import (
     decode_token,
     get_token_payload,
     hash_password,
+    is_token_revoked,
     revoke_access_token,
     verify_password,
     is_jti_revoked,
@@ -43,6 +44,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     )
     if existing is not None:
         raise AppError(409, "USERNAME_TAKEN", "Username already taken within organization")
+        raise AppError(409, "USERNAME_TAKEN", "Username already taken")
 
     user = User(
         org_id=org.id,
@@ -96,6 +98,13 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     if user is None:
         raise AppError(401, "UNAUTHORIZED", "Unknown user")
     revoke_jti(jti)
+    if is_token_revoked(data):
+        raise AppError(401, "UNAUTHORIZED", "Refresh token has already been used")
+    user = db.query(User).filter(User.id == int(data["sub"])).first()
+    if user is None:
+        raise AppError(401, "UNAUTHORIZED", "Unknown user")
+    # Refresh tokens are single-use: invalidate the presented one on rotation.
+    revoke_access_token(data)
     return {
         "access_token": create_access_token(user),
         "refresh_token": create_refresh_token(user),
